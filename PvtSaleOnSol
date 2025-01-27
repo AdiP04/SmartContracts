@@ -1,0 +1,139 @@
+#![cfg_attr(not(feature = "std"), no_std)]
+
+use ink::prelude::vec::Vec;
+use ink::storage;
+
+#[ink::contract]
+mod pvt_sale {
+    use ink::storage::Mapping;
+
+    #[ink(storage)]
+    pub struct PvtSale {
+        mart_token: AccountId,
+        owner: AccountId,
+        total_amount: Mapping<AccountId, u128>,
+        first_reward: Mapping<AccountId, u128>,
+        monthly_reward: Mapping<AccountId, u128>,
+        user_info: Mapping<AccountId, User>,
+    }
+
+    #[derive(Default, scale::Decode, scale::Encode, Clone)]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub struct User {
+        snapshot_time: u64,
+        reward_value: u128,
+        total_withdrawn: u128,
+    }
+
+    impl PvtSale {
+        #[ink(constructor)]
+        pub fn new(mart_token: AccountId) -> Self {
+            Self {
+                mart_token,
+                owner: Self::env().caller(),
+                total_amount: Mapping::default(),
+                first_reward: Mapping::default(),
+                monthly_reward: Mapping::default(),
+                user_info: Mapping::default(),
+            }
+        }
+
+        #[ink(message)]
+        pub fn add_buyers(&mut self, buyers: Vec<AccountId>, amounts: Vec<u128>) {
+            assert!(self.env().caller() == self.owner, "Only owner can call this function");
+            assert!(buyers.len() == amounts.len(), "Buyers and amounts length mismatch");
+
+            for (i, buyer) in buyers.iter().enumerate() {
+                let amount = amounts[i];
+                self.total_amount.insert(buyer, &amount);
+
+                let first_reward = amount * 10 / 100;
+                self.first_reward.insert(buyer, &first_reward);
+
+                let reward = amount - first_reward;
+                self.monthly_reward.insert(buyer, &reward);
+
+                let user = User {
+                    snapshot_time: self.env().block_timestamp(),
+                    reward_value: reward,
+                    total_withdrawn: 0,
+                };
+                self.user_info.insert(buyer, &user);
+            }
+        }
+
+        #[ink(message)]
+        pub fn claim_tge_reward(&mut self) {
+            let caller = self.env().caller();
+            let reward = self.first_reward.get(&caller).unwrap_or(0);
+
+            assert!(reward > 0, "No reward available to claim");
+
+            self.first_reward.insert(&caller, &0);
+            assert!(
+                self.transfer_tokens(caller, reward),
+                "Token transfer failed"
+            );
+        }
+
+        #[ink(message)]
+        pub fn claim_monthly_reward(&mut self) {
+            let caller = self.env().caller();
+            let user = self.user_info.get(&caller).unwrap_or_default();
+            
+            assert!(user.reward_value > 0, "No rewards available");
+
+            let month_counter = (self.env().block_timestamp() - user.snapshot_time) / (30 * 24 * 60 * 60);
+            let claimed_months = user.total_withdrawn / (user.reward_value / 12);
+
+            assert!(claimed_months < month_counter, "No rewards to claim yet");
+
+            let monthly_amount = user.reward_value / 12;
+            self.user_info.insert(
+                &caller,
+                &User {
+                    total_withdrawn: user.total_withdrawn + monthly_amount,
+                    ..user
+                },
+            );
+            
+            self.monthly_reward.insert(&caller, &(user.reward_value - monthly_amount));
+
+            assert!(
+                self.transfer_tokens(caller, monthly_amount),
+                "Token transfer failed"
+            );
+        }
+
+        #[ink(message)]
+        pub fn user_balance(&self, user: AccountId) -> u128 {
+            self.get_token_balance(user)
+        }
+
+        #[ink(message)]
+        pub fn contract_balance(&self) -> u128 {
+            self.get_token_balance(self.env().account_id())
+        }
+
+        fn transfer_tokens(&self, to: AccountId, amount: u128) -> bool {
+            let result = self.env().extension().transfer(self.mart_token, to, amount);
+            result.is_ok()
+        }
+
+        fn get_token_balance(&self, account: AccountId) -> u128 {
+            self.env()
+                .extension()
+                .balance_of(self.mart_token, account)
+                .unwrap_or(0)
+        }
+    }
+
+    #[ink::env_extension]
+    pub trait Erc20Extension {
+        #[ink(extension = 1, returns_result = true)]
+        fn transfer(&self, token: AccountId, to: AccountId, value: u128) -> Result<(), ()>;
+
+        #[ink(extension = 2, returns_result = true)]
+        fn balance_of(&self, token: AccountId, owner: AccountId) -> Result<u128, ()>;
+    }
+}
